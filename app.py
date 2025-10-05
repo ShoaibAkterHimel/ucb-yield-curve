@@ -78,7 +78,9 @@ def get_secondary() -> pd.DataFrame:
     tbill = add_helpers(coerce_cols(load_csv(URL_TBILL)), "Bill")
     tbond = add_helpers(coerce_cols(load_csv(URL_TBOND)), "Bond")
     combined = pd.concat([tbill, tbond], ignore_index=True)
-    combined = combined.sort_values(["Date", "ISIN"]).drop_duplicates(["Date", "ISIN"], keep="last")
+    # Keep ISIN if present, otherwise fallback to InstrumentText to avoid duplicate explosion
+    subset_cols = ["Date", "ISIN"] if "ISIN" in combined.columns else ["Date", "InstrumentText"]
+    combined = combined.sort_values(["Date"] + subset_cols[1:]).drop_duplicates(subset_cols, keep="last")
     return combined
 
 # ───────────────────────────
@@ -192,6 +194,16 @@ def plot_primary(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 # ───────────────────────────
+# TABLE HELPER (robust to missing columns)
+# ───────────────────────────
+def show_sheet_table(df: pd.DataFrame, columns_wanted: list[str]):
+    cols_available = [c for c in columns_wanted if c in df.columns]
+    missing = [c for c in columns_wanted if c not in df.columns]
+    st.dataframe(df[cols_available], use_container_width=True)
+    if missing:
+        st.caption("Note: missing column(s) in sheet → " + ", ".join(missing))
+
+# ───────────────────────────
 # APP UI
 # ───────────────────────────
 st.set_page_config(page_title="UCB AML – Yield Curve Dashboard", layout="wide")
@@ -236,9 +248,9 @@ if view_mode.startswith("Secondary"):
             use_container_width=True,
         )
         st.subheader("Sheet table view (rows used)")
-        st.dataframe(
+        show_sheet_table(
             df_used[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
-            use_container_width=True,
+            ["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"],
         )
 
     # Compare Two Dates
@@ -249,17 +261,15 @@ if view_mode.startswith("Secondary"):
         n1, n2 = nearest(pd.Timestamp(d1)), nearest(pd.Timestamp(d2))
         df1 = curve(n1).assign(Label=str(n1.date()))
         df2 = curve(n2).assign(Label=str(n2.date()))
-        merged = pd.concat([df1, df2], ignore_index=True)
+        merged = pd.concat([df1, df2], ignore_index=True).sort_values(["Label","MaturityYears"])
         st.plotly_chart(
             plot_secondary_compare(merged, f"Secondary Comparison — {n1.date()} vs {n2.date()}"),
             use_container_width=True,
         )
         st.subheader("Sheet table view (rows used)")
-        st.dataframe(
-            merged.sort_values(["Label","MaturityYears"])[
-                ["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]
-            ],
-            use_container_width=True,
+        show_sheet_table(
+            merged[["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
+            ["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"],
         )
 
     # Compare Two Months
@@ -280,18 +290,16 @@ if view_mode.startswith("Secondary"):
 
         df1 = curve(d1).assign(Label=f"{m1} (latest)")
         df2 = curve(d2).assign(Label=f"{m2} (latest)")
-        merged = pd.concat([df1, df2], ignore_index=True)
+        merged = pd.concat([df1, df2], ignore_index=True).sort_values(["Label","MaturityYears"])
 
         st.plotly_chart(
             plot_secondary_compare(merged, f"Secondary Comparison — {m1} vs {m2}"),
             use_container_width=True,
         )
         st.subheader("Sheet table view (rows used)")
-        st.dataframe(
-            merged.sort_values(["Label","MaturityYears"])[
-                ["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]
-            ],
-            use_container_width=True,
+        show_sheet_table(
+            merged[["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
+            ["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"],
         )
 
 # ─────────────── PRIMARY VIEW ───────────────
@@ -342,4 +350,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Secondary = GSOM market yields. Primary = auction cut-off yields. Comparison views draw one continuous line per date/month; the table shows exactly the rows used.")
+st.caption("Secondary = GSOM market yields. Primary = auction cut-off yields. Comparison views draw one continuous line per date/month; the table shows exactly the rows used (columns shown only if present).")
