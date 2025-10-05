@@ -280,6 +280,111 @@ else:
             comp.sort_values(["Which","MaturityYears"])[["Date","Which","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
             use_container_width=True,
         )
+# ───────────────────────────
+# PRIMARY AUCTION VIEW – Monthly comparison
+# ───────────────────────────
+st.header("Primary Auction: Monthly Comparison")
+
+# Primary Auction Sheet
+SHEET_PRIMARY_ID = "1O5seVugWVYfCo7M7Zkn4VW6GltC77G1w0EsmhZEwNkk"
+SHEET_PRIMARY_GID = "193103690"
+URL_PRIMARY = f"https://docs.google.com/spreadsheets/d/{SHEET_PRIMARY_ID}/export?format=csv&gid={SHEET_PRIMARY_GID}"
+
+@st.cache_data(ttl=60*30)
+def load_primary() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(URL_PRIMARY)
+    except Exception as e:
+        st.error(f"Failed to load Primary Auction sheet: {e}")
+        return pd.DataFrame()
+
+    # Column detection
+    c_date = next((c for c in ["Issue Date", "IssueDate", "Date"] if c in df.columns), None)
+    c_instr = next((c for c in ["Instrument", "Security", "Securities"] if c in df.columns), None)
+    c_yld = next((c for c in ["Cut-off Yield (%)", "Cutoff Yield (%)", "Cut Off Yield (%)"] if c in df.columns), None)
+
+    if not all([c_date, c_instr, c_yld]):
+        st.warning("Primary sheet missing one or more required columns.")
+        return pd.DataFrame()
+
+    df = df.rename(columns={c_date:"IssueDate", c_instr:"Instrument", c_yld:"CutoffYield"})
+    df["IssueDate"] = pd.to_datetime(df["IssueDate"], errors="coerce", dayfirst=True)
+    df["CutoffYield"] = pd.to_numeric(df["CutoffYield"], errors="coerce")
+
+    # Extract Tenor (in years)
+    def parse_tenor(txt):
+        if not isinstance(txt,str): return np.nan
+        s = txt.lower()
+        import re
+        m = re.search(r'(\d+(?:\.\d+)?)\s*(day|days|month|months|year|years|yr|yrs|y)\b', s)
+        if not m: return np.nan
+        val, unit = float(m.group(1)), m.group(2)
+        if "day" in unit: return val/365
+        if "month" in unit: return val*30/365
+        return val
+    df["TenorYears"] = df["Instrument"].apply(parse_tenor)
+    df["Month"] = df["IssueDate"].dt.to_period("M").astype(str)
+    df = df.dropna(subset=["TenorYears","CutoffYield","IssueDate"])
+    return df
+
+pri_df = load_primary()
+if not pri_df.empty:
+    months = sorted(pri_df["Month"].unique())
+    if len(months) >= 1:
+        latest_month = months[-1]
+        prev_month = months[-2] if len(months) > 1 else months[-1]
+        st.subheader("Compare two months (latest auction per tenor)")
+        c1, c2 = st.columns(2)
+        with c1:
+            m1 = st.selectbox("Month A", months, index=months.index(prev_month) if prev_month in months else 0)
+        with c2:
+            m2 = st.selectbox("Month B", months, index=months.index(latest_month))
+
+        def month_subset(m):
+            sub = pri_df[pri_df["Month"] == m].copy()
+            if sub.empty: return sub
+            idx = sub.groupby("TenorYears")["IssueDate"].idxmax()  # latest per tenor
+            return sub.loc[idx].sort_values("TenorYears")
+
+        dfA = month_subset(m1)
+        dfB = month_subset(m2)
+
+        if dfA.empty or dfB.empty:
+            st.warning("No data found for one (or both) selected months.")
+        else:
+            dfA["Label"], dfB["Label"] = m1, m2
+            df_all = pd.concat([dfA, dfB], ignore_index=True)
+
+            fig = go.Figure()
+            for label, grp in df_all.groupby("Label"):
+                grp = grp.sort_values("TenorYears")
+                fig.add_trace(
+                    go.Scatter(
+                        x=grp["TenorYears"], y=grp["CutoffYield"],
+                        mode="lines+markers", name=str(label),
+                        line=dict(shape="spline"),
+                        text=grp["Instrument"],
+                        hovertemplate="Instrument: %{text}<br>Tenor: %{x:.2f} yrs<br>Yield: %{y:.2f}%<extra></extra>",
+                    )
+                )
+            fig.update_yaxes(range=[0, 16], title="Cut-off Yield (%)")
+            fig.update_xaxes(title="Tenor (years)")
+            fig.update_layout(height=520, title=f"Primary Auction Yield Curve Comparison — {m1} vs {m2}")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.dataframe(
+                df_all[["IssueDate","Instrument","TenorYears","CutoffYield","Label"]]
+                .rename(columns={
+                    "IssueDate":"Issue Date","TenorYears":"Tenor (years)",
+                    "CutoffYield":"Cut-off Yield (%)","Label":"Month"
+                })
+                .sort_values(["Month","Tenor (years)"]),
+                use_container_width=True,
+            )
+    else:
+        st.warning("No valid months detected in Primary Auction sheet.")
+else:
+    st.error("Primary auction data unavailable or empty.")
 
 st.markdown("---")
 st.caption("Calendars allow any date (2000–today). If data isn’t available, we use the nearest trading date (or latest within that month).")
