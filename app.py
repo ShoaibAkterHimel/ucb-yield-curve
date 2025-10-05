@@ -16,7 +16,7 @@ SHEET_TBOND_ID = "1ma25T-_yMlzdrzOYxAr2P6eu1gsbjPzq3jxF4PK-xtk"
 SHEET_TBOND_GID = "632609507"
 # Primary Auction (your shared sheet)
 SHEET_PRIMARY_ID = "1O5seVugWVYfCo7M7Zkn4VW6GltC77G1w0EsmhZEwNkk"
-SHEET_PRIMARY_GID = "0"
+SHEET_PRIMARY_GID = "193103690"
 
 def csv_url(sheet_id: str, gid: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
