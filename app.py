@@ -12,11 +12,11 @@ import streamlit as st
 # ───────────────────────────
 # CONFIG: your two GSOM sheets (secondary MTM)
 # ───────────────────────────
-SHEET_TBILL_ID = "1AQFsSm5BXTD9fjM-MMv13tJx48zKLnSE_Z2S_mxbe7o"
-SHEET_TBILL_GID = "603716852"
+SHEET_TBILL_ID = "1rD831MnVWUGlitw1jUmdwt5jQPrkKMwrQTWBy6P9tAs"
+SHEET_TBILL_GID = "1446111990"
 
-SHEET_TBOND_ID = "1qm-HDBK3g0T-oZAGCQutsIRF16932s-pQRTUqPZ-tL8"
-SHEET_TBOND_GID = "1598348590"
+SHEET_TBOND_ID = "1ma25T-_yMlzdrzOYxAr2P6eu1gsbjPzq3jxF4PK-xtk"
+SHEET_TBOND_GID = "632609507"
 
 def csv_url(sheet_id: str, gid: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
