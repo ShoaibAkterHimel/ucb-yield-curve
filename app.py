@@ -15,7 +15,7 @@ SHEET_TBOND_GID = "632609507"
 SHEET_PRIMARY_ID = "1O5seVugWVYfCo7M7Zkn4VW6GltC77G1w0EsmhZEwNkk"
 SHEET_PRIMARY_GID = "193103690"
 
-def csv_url(sheet_id, gid): 
+def csv_url(sheet_id, gid):
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
 URL_TBILL   = csv_url(SHEET_TBILL_ID, SHEET_TBILL_GID)
@@ -104,19 +104,21 @@ def plot_secondary(df,title):
     fig=go.Figure()
     for typ,d in df.groupby("Type"):
         d=d.sort_values("MaturityYears")
-        fig.add_trace(go.Scatter(x=d["MaturityYears"],y=d["MarketYield"],mode="lines+markers",
-                                 name=typ,line=dict(shape="spline")))
+        fig.add_trace(go.Scatter(x=d["MaturityYears"],y=d["MarketYield"],
+                                 mode="lines+markers",name=typ,line=dict(shape="spline")))
     fig.update_yaxes(range=[0,16],title="Yield (%)")
     fig.update_xaxes(title="Remaining Maturity (years)")
     fig.update_layout(height=520,title=title)
     return fig
 
 def plot_primary(df,title):
-    df=df.sort_values("TenorYears")
-    fig=go.Figure(go.Scatter(x=df["TenorYears"],y=df["CutoffYield"],
-                             mode="lines+markers",line=dict(shape="spline"),
-                             text=df["Instrument"],
-                             hovertemplate="Instrument: %{text}<br>Tenor: %{x:.2f} yrs<br>Yield: %{y:.2f}%<extra></extra>"))
+    fig=go.Figure()
+    for label,d in df.groupby("Label"):
+        d=d.sort_values("TenorYears")
+        fig.add_trace(go.Scatter(x=d["TenorYears"],y=d["CutoffYield"],
+                                 mode="lines+markers",name=label,line=dict(shape="spline"),
+                                 text=d["Instrument"],
+                                 hovertemplate="Instrument: %{text}<br>Tenor: %{x:.2f} yrs<br>Yield: %{y:.2f}%<extra></extra>"))
     fig.update_yaxes(range=[0,16],title="Cut-off Yield (%)")
     fig.update_xaxes(title="Tenor (years)")
     fig.update_layout(height=520,title=title)
@@ -128,17 +130,23 @@ def plot_primary(df,title):
 st.set_page_config(page_title="Bangladesh Yield Curves – GSOM & Primary",layout="wide")
 st.title("Bangladesh Govt Securities – Yield Curves")
 
-view=st.sidebar.radio("View:",["Secondary: Single date","Secondary: Compare two dates","Primary auction: Monthly"],index=0)
+view=st.sidebar.radio("View:",[
+    "Secondary: Single date",
+    "Secondary: Compare two dates",
+    "Primary auction: Compare two months"
+],index=0)
 
 sec_df=get_secondary(); pri_df=get_primary()
 
+# ─────────────── Secondary ───────────────
 if view.startswith("Secondary"):
     if sec_df.empty: st.error("Secondary data empty"); st.stop()
     all_dates=sorted(sec_df["Date"].dropna().unique())
+
     def nearest(target):
-        if not len(all_dates): return None
         dist=pd.Series([abs((pd.Timestamp(d)-target).days) for d in all_dates],index=all_dates)
         return dist.idxmin()
+
     def curve(d): return sec_df[sec_df["Date"]==d]
 
     if view=="Secondary: Single date":
@@ -153,29 +161,49 @@ if view.startswith("Secondary"):
         with c1: d1=st.date_input("Date A",value=MAX_CAL_DATE)
         with c2: d2=st.date_input("Date B",value=MAX_CAL_DATE)
         n1,n2=nearest(pd.Timestamp(d1)),nearest(pd.Timestamp(d2))
-        A,B=curve(n1).assign(Which=str(n1.date())),curve(n2).assign(Which=str(n2.date()))
+        A,B=curve(n1).assign(Label=str(n1.date())),curve(n2).assign(Label=str(n2.date()))
         df=pd.concat([A,B])
-        fig=go.Figure()
-        for w,d in df.groupby("Which"):
-            d=d.sort_values("MaturityYears")
-            fig.add_trace(go.Scatter(x=d["MaturityYears"],y=d["MarketYield"],mode="lines+markers",name=w))
-        fig.update_yaxes(range=[0,16],title="Yield (%)"); fig.update_xaxes(title="Remaining Maturity (years)")
-        fig.update_layout(title=f"Secondary Comparison – {n1.date()} vs {n2.date()}")
-        st.plotly_chart(fig,use_container_width=True)
+        st.plotly_chart(plot_secondary(df,f"Secondary Comparison – {n1.date()} vs {n2.date()}"),use_container_width=True)
 
+# ─────────────── Primary ───────────────
 else:
-    if pri_df.empty: st.error("Primary auction data empty"); st.stop()
-    # Month picker (unique available months)
+    if pri_df.empty:
+        st.error("Primary auction data empty"); st.stop()
+
     months=sorted(pri_df["Month"].unique())
-    sel=st.selectbox("Select month",months,index=len(months)-1)
-    df=pri_df[pri_df["Month"]==sel]
-    if df.empty: st.warning(f"No data in {sel}")
+    if not months:
+        st.warning("No valid months found."); st.stop()
+
+    # Default = latest month and previous month (if exists)
+    latest_month=months[-1]
+    prev_month=months[-2] if len(months)>1 else months[-1]
+
+    c1,c2=st.columns(2)
+    with c1:
+        m1=st.selectbox("Select Month A",months,index=months.index(prev_month) if prev_month in months else 0)
+    with c2:
+        m2=st.selectbox("Select Month B",months,index=months.index(latest_month))
+
+    df_list=[]
+    for label,m in [(m1,"Month A"),(m2,"Month B")]:
+        sub=pri_df[pri_df["Month"]==m].copy()
+        if sub.empty: continue
+        sub=sub.sort_values("IssueDate")
+        idx=sub.groupby("TenorYears")["IssueDate"].idxmax()
+        sub=sub.loc[idx].sort_values("TenorYears")
+        sub["Label"]=m
+        df_list.append(sub)
+
+    if not df_list:
+        st.warning("No data found for selected months.")
     else:
-        idx=df.groupby("TenorYears")["IssueDate"].idxmax()
-        df=df.loc[idx].sort_values("TenorYears")
-        st.plotly_chart(plot_primary(df,f"Primary Auction Yield Curve – {sel}"),use_container_width=True)
-        st.dataframe(df[["IssueDate","Instrument","TenorYears","CutoffYield"]]
-                     .rename(columns={"CutoffYield":"Cut-off Yield (%)","TenorYears":"Tenor (years)"}))
+        df=pd.concat(df_list)
+        st.plotly_chart(plot_primary(df,f"Primary Auction Comparison — {m1} vs {m2}"),use_container_width=True)
+        st.dataframe(
+            df[["IssueDate","Instrument","TenorYears","CutoffYield","Label"]]
+              .rename(columns={"CutoffYield":"Cut-off Yield (%)","TenorYears":"Tenor (years)","Label":"Month"})
+              .sort_values(["Month","Tenor (years)"])
+        )
 
 st.markdown("---")
-st.caption("Secondary: date-based (nearest trading day). Primary: month-based (latest auction per tenor). Y-axis fixed 0–16%.")
+st.caption("Secondary: by trading dates. Primary: compares two months (latest per tenor). Y-axis fixed 0–16%.")
