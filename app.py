@@ -1,4 +1,3 @@
-import io
 from datetime import date
 import pandas as pd
 import numpy as np
@@ -6,12 +5,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ───────────────────────────
-# CONFIG: your GSOM Google Sheets (secondary MTM) – UPDATED
+# CONFIG: GSOM Google Sheets (secondary MTM) – UPDATED
 # ───────────────────────────
 # T-Bill
 SHEET_TBILL_ID = "1rD831MnVWUGlitw1jUmdwt5jQPrkKMwrQTWBy6P9tAs"
 SHEET_TBILL_GID = "1446111990"
-
 # T-Bond
 SHEET_TBOND_ID = "1ma25T-_yMlzdrzOYxAr2P6eu1gsbjPzq3jxF4PK-xtk"
 SHEET_TBOND_GID = "632609507"
@@ -30,7 +28,6 @@ def load_csv(url: str) -> pd.DataFrame:
     return pd.read_csv(url)
 
 def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardize the column names and types based on your Sheet layout."""
     COLMAP = {
         "Date": ["Date"],
         "ISIN": ["ISIN"],
@@ -51,7 +48,6 @@ def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
 
     for c in ["Date", "IssueDate", "MaturityDate"]:
         out[c] = pd.to_datetime(out[c], errors="coerce")
-
     for c in ["IssuePrice", "RemainingMaturity", "MarketYield", "MarketPrice", "Outstanding"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
 
@@ -59,16 +55,14 @@ def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def add_helpers(df: pd.DataFrame, inst_type: str) -> pd.DataFrame:
-    """Add calculated fields (Type, MaturityYears, Month)."""
     df = df.copy()
     df["Type"] = inst_type  # Bill or Bond
-
-    # Bills: RemainingMaturity is in DAYS → convert; Bonds already in YEARS
-    if inst_type.lower() == "bill":
-        df["MaturityYears"] = df["RemainingMaturity"] / 365.0
-    else:
-        df["MaturityYears"] = df["RemainingMaturity"]
-
+    # Bills: days → years ; Bonds: already years
+    df["MaturityYears"] = np.where(
+        df["Type"].str.lower().eq("bill"),
+        df["RemainingMaturity"] / 365.0,
+        df["RemainingMaturity"],
+    )
     df = df[(df["MaturityYears"].notna()) & (df["MaturityYears"] > 0)]
     df = df[df["MarketYield"].notna()]
     df["Month"] = df["Date"].dt.to_period("M").astype(str)
@@ -83,7 +77,7 @@ def get_combined() -> pd.DataFrame:
     return combined
 
 # ───────────────────────────
-# PLOTTING
+# HELPERS
 # ───────────────────────────
 def plot_curve(cdf: pd.DataFrame, title: str) -> go.Figure:
     """Sorted, spline-smoothed, fixed axes, one line per Type."""
@@ -93,27 +87,38 @@ def plot_curve(cdf: pd.DataFrame, title: str) -> go.Figure:
         df_typ = df_typ.sort_values("MaturityYears")
         fig.add_trace(
             go.Scatter(
-                x=df_typ["MaturityYears"],
-                y=df_typ["MarketYield"],
-                mode="lines+markers",
-                name=str(typ),
-                line=dict(shape="spline"),
-                connectgaps=True,
+                x=df_typ["MaturityYears"], y=df_typ["MarketYield"],
+                mode="lines+markers", name=str(typ),
+                line=dict(shape="spline"), connectgaps=True,
                 text=df_typ["InstrumentText"],
-                hovertemplate=(
-                    "Type: %{name}<br>"
-                    "Maturity: %{x:.3f} yrs<br>"
-                    "Yield: %{y:.3f}%<br>"
-                    "ISIN: %{text}<extra></extra>"
-                ),
+                hovertemplate=("Type: %{name}<br>"
+                               "Maturity: %{x:.3f} yrs<br>"
+                               "Yield: %{y:.3f}%<br>"
+                               "ISIN: %{text}<extra></extra>"),
             )
         )
     x_max = float(np.nanmax(cdf["MaturityYears"])) if not cdf["MaturityYears"].empty else 1.0
-    x_padding = max(0.5, x_max * 0.05)
+    x_pad = max(0.5, x_max * 0.05)
     fig.update_yaxes(range=[0, 16], title="Yield (%)")
-    fig.update_xaxes(range=[0, x_max + x_padding], title="Remaining Maturity (years)")
+    fig.update_xaxes(range=[0, x_max + x_pad], title="Remaining Maturity (years)")
     fig.update_layout(height=520, title=title)
     return fig
+
+def latest_date_in_month(df: pd.DataFrame, month_str: str):
+    s = df.loc[df["Month"] == month_str, "Date"]
+    return s.max() if not s.empty else None
+
+def nearest_available_date(all_dates: list, target: pd.Timestamp):
+    if not len(all_dates):
+        return None
+    distances = pd.Series([abs((pd.Timestamp(d) - target).days) for d in all_dates], index=all_dates)
+    return distances.idxmin()
+
+def curve_for_date(df: pd.DataFrame, d: pd.Timestamp) -> pd.DataFrame:
+    return df[df["Date"] == d].copy()
+
+def month_str_from_date(d: date) -> str:
+    return pd.Timestamp(d).to_period("M").strftime("%Y-%m")
 
 # ───────────────────────────
 # APP UI
@@ -127,81 +132,78 @@ if df.empty:
     st.error("No data loaded. Check sheet sharing & CSV export permissions.")
     st.stop()
 
-st.sidebar.header("Filters & View")
+# Calendar bounds from data
+all_dates = sorted(df["Date"].dropna().unique())
+min_d = pd.to_datetime(min(all_dates)).date()
+max_d = pd.to_datetime(max(all_dates)).date()
+
+st.sidebar.header("View mode")
 view_mode = st.sidebar.radio(
-    "View mode:",
-    ["Single date / Latest-in-month", "Compare two months", "Compare two dates"],
-    0,
+    "Choose a view:",
+    ["Single date", "Latest-in-month", "Compare two months", "Compare two dates"],
+    index=0,
 )
 
-all_dates = sorted(df["Date"].dropna().unique())
-all_months = sorted(df["Month"].dropna().unique())
-
-def latest_date_in_month(month_str: str):
-    s = df.loc[df["Month"] == month_str, "Date"]
-    return s.max() if not s.empty else None
-
-def nearest_available_date(target: pd.Timestamp):
-    if not len(all_dates):
-        return None
-    distances = pd.Series([abs((pd.Timestamp(d) - target).days) for d in all_dates], index=all_dates)
-    return distances.idxmin()
-
-def curve_for_date(d: pd.Timestamp) -> pd.DataFrame:
-    return df[df["Date"] == d].copy()
-
 # ───────────────────────────
-# 1) SINGLE-DATE / LATEST-IN-MONTH
+# 1) SINGLE DATE — Calendar picker → nearest trading date
 # ───────────────────────────
-if view_mode == "Single date / Latest-in-month":
-    tab1, tab2 = st.tabs(["Pick a specific date", "Pick a month (latest date)"])
-
-    with tab1:
-        pick = st.selectbox("Select a date", options=all_dates, format_func=lambda x: x.strftime("%Y-%m-%d"))
-        cdf = curve_for_date(pick)
-        st.plotly_chart(plot_curve(cdf, f"Yield Curve – {pick.strftime('%Y-%m-%d')}"), use_container_width=True)
-
-        st.caption("Filtered data")
+if view_mode == "Single date":
+    picked = st.date_input("Pick any date", value=max_d, min_value=min_d, max_value=max_d, key="single_cal")
+    nearest = nearest_available_date(all_dates, pd.Timestamp(picked))
+    if nearest is None:
+        st.warning("No data available around the selected date.")
+    else:
+        if nearest.date() != picked:
+            st.info(f"Adjusted to nearest available trading date: **{nearest.strftime('%Y-%m-%d')}**")
+        cdf = curve_for_date(df, nearest)
+        st.plotly_chart(plot_curve(cdf, f"Yield Curve — {nearest.strftime('%Y-%m-%d')}"), use_container_width=True)
         st.dataframe(
             cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
             use_container_width=True,
         )
 
-    with tab2:
-        pick_m = st.selectbox("Select a month (yyyy-mm)", options=all_months, index=len(all_months)-1 if all_months else 0)
-        d_latest = latest_date_in_month(pick_m)
-        if d_latest is None:
-            st.warning("No data in that month.")
-        else:
-            cdf = curve_for_date(d_latest)
-            st.plotly_chart(plot_curve(cdf, f"Yield Curve – latest in {pick_m} (Date: {d_latest.strftime('%Y-%m-%d')})"),
-                            use_container_width=True)
-            st.caption("Filtered data")
-            st.dataframe(
-                cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
-                use_container_width=True,
-            )
+# ───────────────────────────
+# 2) LATEST-IN-MONTH — Calendar picker → latest date in that month
+# ───────────────────────────
+elif view_mode == "Latest-in-month":
+    picked = st.date_input("Pick any date (we'll use the latest date in that month)",
+                           value=max_d, min_value=min_d, max_value=max_d, key="month_cal")
+    m = month_str_from_date(picked)
+    d_latest = latest_date_in_month(df, m)
+    if d_latest is None:
+        st.warning(f"No data found in {m}. Try another month.")
+    else:
+        cdf = curve_for_date(df, d_latest)
+        st.plotly_chart(
+            plot_curve(cdf, f"Yield Curve — latest in {m} (Date: {d_latest.strftime('%Y-%m-%d')})"),
+            use_container_width=True,
+        )
+        st.dataframe(
+            cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
+            use_container_width=True,
+        )
 
 # ───────────────────────────
-# 2) COMPARE TWO MONTHS (latest dates within each month)
+# 3) COMPARE TWO MONTHS — Two calendars → latest date in each month
 # ───────────────────────────
 elif view_mode == "Compare two months":
-    left, right = st.columns(2)
-    with left:
-        m1 = st.selectbox("Month A", options=all_months, index=max(0, len(all_months)-2))
-        d1 = latest_date_in_month(m1)
-        st.caption(f"Latest date in Month A = **{d1.strftime('%Y-%m-%d') if d1 is not None else 'N/A'}**")
-    with right:
-        m2 = st.selectbox("Month B", options=all_months, index=len(all_months)-1)
-        d2 = latest_date_in_month(m2)
-        st.caption(f"Latest date in Month B = **{d2.strftime('%Y-%m-%d') if d2 is not None else 'N/A'}**")
+    c1, c2 = st.columns(2)
+    with c1:
+        pickA = st.date_input("Pick any date for Month A", value=max_d, min_value=min_d, max_value=max_d, key="mA_cal")
+    with c2:
+        pickB = st.date_input("Pick any date for Month B", value=max_d, min_value=min_d, max_value=max_d, key="mB_cal")
+
+    m1 = month_str_from_date(pickA)
+    m2 = month_str_from_date(pickB)
+    d1 = latest_date_in_month(df, m1)
+    d2 = latest_date_in_month(df, m2)
 
     if d1 is None or d2 is None:
-        st.warning("Select months that contain data.")
+        st.warning("No data in one (or both) of the selected months. Try different months.")
     else:
-        c1 = curve_for_date(d1).assign(Which=f"{m1} (latest)")
-        c2 = curve_for_date(d2).assign(Which=f"{m2} (latest)")
-        comp = pd.concat([c1, c2], ignore_index=True)
+        c1df = curve_for_date(df, d1).assign(Which=f"{m1} (latest)")
+        c2df = curve_for_date(df, d2).assign(Which=f"{m2} (latest)")
+        comp = pd.concat([c1df, c2df], ignore_index=True)
 
         fig = go.Figure()
         for which, dfx in comp.groupby("Which"):
@@ -212,55 +214,46 @@ elif view_mode == "Compare two months":
                     mode="lines+markers", name=str(which),
                     line=dict(shape="spline"), connectgaps=True,
                     text=dfx["InstrumentText"],
-                    hovertemplate=(
-                        "%{name}<br>Maturity: %{x:.3f} yrs<br>Yield: %{y:.3f}%<br>"
-                        "ISIN: %{text}<extra></extra>"
-                    ),
+                    hovertemplate=("%{name}<br>Maturity: %{x:.3f} yrs<br>"
+                                   "Yield: %{y:.3f}%<br>ISIN: %{text}<extra></extra>"),
                 )
             )
         x_max = float(np.nanmax(comp["MaturityYears"])) if not comp["MaturityYears"].empty else 1.0
-        x_padding = max(0.5, x_max * 0.05)
+        x_pad = max(0.5, x_max * 0.05)
         fig.update_yaxes(range=[0, 16], title="Yield (%)")
-        fig.update_xaxes(range=[0, x_max + x_padding], title="Remaining Maturity (years)")
-        fig.update_layout(height=560, title=f"Yield Curve Comparison – {m1} vs {m2} (latest dates)")
+        fig.update_xaxes(range=[0, x_max + x_pad], title="Remaining Maturity (years)")
+        fig.update_layout(height=560, title=f"Yield Curve Comparison — {m1} vs {m2}")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.caption("Data used in comparison")
         st.dataframe(
             comp.sort_values(["Which","MaturityYears"])[["Date","Which","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
             use_container_width=True,
         )
 
 # ───────────────────────────
-# 3) COMPARE TWO DATES (Calendar widgets)
+# 4) COMPARE TWO DATES — Two calendars → nearest trading dates
 # ───────────────────────────
 else:
-    st.subheader("Compare two specific dates")
-    min_d = pd.to_datetime(min(all_dates)).date() if len(all_dates) else date(2024,1,1)
-    max_d = pd.to_datetime(max(all_dates)).date() if len(all_dates) else date.today()
-
     c1, c2 = st.columns(2)
     with c1:
-        sel1 = st.date_input("Date A", value=max_d, min_value=min_d, max_value=max_d, key="dateA")
+        dA = st.date_input("Date A", value=max_d, min_value=min_d, max_value=max_d, key="dA_cal")
     with c2:
-        sel2 = st.date_input("Date B", value=max_d, min_value=min_d, max_value=max_d, key="dateB")
+        dB = st.date_input("Date B", value=max_d, min_value=min_d, max_value=max_d, key="dB_cal")
 
-    sel1_ts = pd.Timestamp(sel1)
-    sel2_ts = pd.Timestamp(sel2)
-    d1 = nearest_available_date(sel1_ts)
-    d2 = nearest_available_date(sel2_ts)
+    nA = nearest_available_date(all_dates, pd.Timestamp(dA))
+    nB = nearest_available_date(all_dates, pd.Timestamp(dB))
 
-    if d1 is None or d2 is None:
+    if nA is None or nB is None:
         st.warning("No data available around the selected dates.")
     else:
-        if d1 != sel1_ts:
-            st.info(f"Date A adjusted to nearest available: **{d1.strftime('%Y-%m-%d')}**")
-        if d2 != sel2_ts:
-            st.info(f"Date B adjusted to nearest available: **{d2.strftime('%Y-%m-%d')}**")
+        if nA.date() != dA:
+            st.info(f"Date A adjusted to nearest trading date: **{nA.strftime('%Y-%m-%d')}**")
+        if nB.date() != dB:
+            st.info(f"Date B adjusted to nearest trading date: **{nB.strftime('%Y-%m-%d')}**")
 
-        a = curve_for_date(d1).assign(Which=f"{d1.strftime('%Y-%m-%d')}")
-        b = curve_for_date(d2).assign(Which=f"{d2.strftime('%Y-%m-%d')}")
-        comp = pd.concat([a, b], ignore_index=True)
+        A = curve_for_date(df, nA).assign(Which=f"{nA.strftime('%Y-%m-%d')}")
+        B = curve_for_date(df, nB).assign(Which=f"{nB.strftime('%Y-%m-%d')}")
+        comp = pd.concat([A, B], ignore_index=True)
 
         fig = go.Figure()
         for which, dfx in comp.groupby("Which"):
@@ -271,26 +264,21 @@ else:
                     mode="lines+markers", name=str(which),
                     line=dict(shape="spline"), connectgaps=True,
                     text=dfx["InstrumentText"],
-                    hovertemplate=(
-                        "%{name}<br>Maturity: %{x:.3f} yrs<br>Yield: %{y:.3f}%<br>"
-                        "ISIN: %{text}<extra></extra>"
-                    ),
+                    hovertemplate=("%{name}<br>Maturity: %{x:.3f} yrs<br>"
+                                   "Yield: %{y:.3f}%<br>ISIN: %{text}<extra></extra>"),
                 )
             )
         x_max = float(np.nanmax(comp["MaturityYears"])) if not comp["MaturityYears"].empty else 1.0
-        x_padding = max(0.5, x_max * 0.05)
+        x_pad = max(0.5, x_max * 0.05)
         fig.update_yaxes(range=[0, 16], title="Yield (%)")
-        fig.update_xaxes(range=[0, x_max + x_padding], title="Remaining Maturity (years)")
-        fig.update_layout(height=560, title=f"Yield Curve Comparison – {a['Which'].iloc[0]} vs {b['Which'].iloc[0]}")
+        fig.update_xaxes(range=[0, x_max + x_pad], title="Remaining Maturity (years)")
+        fig.update_layout(height=560, title=f"Yield Curve Comparison — {A['Which'].iloc[0]} vs {B['Which'].iloc[0]}")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.caption("Data used in comparison")
         st.dataframe(
             comp.sort_values(["Which","MaturityYears"])[["Date","Which","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
             use_container_width=True,
         )
 
 st.markdown("---")
-st.caption(
-    "Sorted by maturity, spline lines, fixed Y-axis 0–16%. Bills: days→years; Bonds: years as-is."
-)
+st.caption("All views use calendar inputs. Y-axis fixed 0–16%. Bills: days→years; Bonds: years as-is.")
