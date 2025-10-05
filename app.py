@@ -18,7 +18,7 @@ SHEET_TBOND_ID = "1qm-HDBK3g0T-oZAGCQutsIRF16932s-pQRTUqPZ-tL8"
 SHEET_TBOND_GID = "1598348590"
 
 def csv_url(sheet_id: str, gid: str) -> str:
-    # public CSV export URL
+    """Return the public CSV export URL of a Google Sheet tab."""
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
 URL_TBILL = csv_url(SHEET_TBILL_ID, SHEET_TBILL_GID)
@@ -29,17 +29,16 @@ URL_TBOND = csv_url(SHEET_TBOND_ID, SHEET_TBOND_GID)
 # ───────────────────────────
 @st.cache_data(ttl=60 * 30)  # refresh every 30 minutes
 def load_csv(url: str) -> pd.DataFrame:
+    """Read a CSV export of a Google Sheet."""
     df = pd.read_csv(url)
     return df
 
 def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Map the columns we need and coerce types based on your layout screenshot."""
-    # expected columns by (friendly_name -> possible headers)
-    # (We keep this flexible so future changes don't break)
+    """Standardize the column names and types."""
     COLMAP = {
         "Date": ["Date"],
         "ISIN": ["ISIN"],
-        "InstrumentText": ["Securities", "Securities "],  # some sheets have trailing space
+        "InstrumentText": ["Securities", "Securities "],
         "IssueDate": ["IssueDate", "Issue Date"],
         "MaturityDate": ["Maturity/Expiry Date", "Maturity / Expiry Date", "MaturityDate"],
         "IssuePrice": ["IssuePrice", "Issue Price"],
@@ -50,45 +49,43 @@ def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
         "Source": ["Source"],
     }
 
-    # build new df with standardized columns if present
     out = pd.DataFrame()
     for new, candidates in COLMAP.items():
         col = next((c for c in candidates if c in df.columns), None)
-        if col is not None:
-            out[new] = df[col]
-        else:
-            out[new] = np.nan
+        out[new] = df[col] if col else np.nan
 
-    # types
+    # Coerce date columns
     for c in ["Date", "IssueDate", "MaturityDate"]:
-        if c in out.columns:
-            out[c] = pd.to_datetime(out[c], errors="coerce", dayfirst=False)
+        out[c] = pd.to_datetime(out[c], errors="coerce", dayfirst=False)
 
-    # numeric coercions
+    # Coerce numeric columns
     for c in ["IssuePrice", "RemainingMaturity", "MarketYield", "MarketPrice", "Outstanding"]:
-        if c in out.columns:
-            out[c] = pd.to_numeric(out[c], errors="coerce")
+        out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    # strip instrument text
-    if "InstrumentText" in out.columns:
-        out["InstrumentText"] = out["InstrumentText"].astype(str).str.strip()
-
+    # Clean text
+    out["InstrumentText"] = out["InstrumentText"].astype(str).str.strip()
     return out
 
 def add_helpers(df: pd.DataFrame, inst_type: str) -> pd.DataFrame:
+    """Add calculated fields (type, maturity in years, month label)."""
     df = df.copy()
     df["Type"] = inst_type  # Bill or Bond
-    # Market-time-to-maturity in years (this is what a yield curve uses)
-    df["MaturityYears"] = df["RemainingMaturity"] / 365.0
-    # keep only positive maturities & yields
+
+    # ✅ FIXED LOGIC: convert only for Bills (days → years)
+    if inst_type.lower() == "bill":
+        df["MaturityYears"] = df["RemainingMaturity"] / 365.0
+    else:
+        df["MaturityYears"] = df["RemainingMaturity"]
+
+    # Clean
     df = df[(df["MaturityYears"].notna()) & (df["MaturityYears"] > 0)]
     df = df[df["MarketYield"].notna()]
-    # Month label for filtering
-    df["Month"] = df["Date"].dt.to_period("M").astype(str)  # yyyy-mm
+    df["Month"] = df["Date"].dt.to_period("M").astype(str)
     return df
 
 @st.cache_data(ttl=60 * 30)
 def get_combined() -> pd.DataFrame:
+    """Load, normalize, and merge both T-Bill and T-Bond datasets."""
     tbill_raw = load_csv(URL_TBILL)
     tbond_raw = load_csv(URL_TBOND)
 
@@ -96,8 +93,10 @@ def get_combined() -> pd.DataFrame:
     tbond = add_helpers(coerce_cols(tbond_raw), "Bond")
 
     combined = pd.concat([tbill, tbond], ignore_index=True)
-    # Remove duplicates if any (same Date + ISIN)
-    combined = combined.sort_values(["Date", "ISIN"]).drop_duplicates(subset=["Date", "ISIN"], keep="last")
+    combined = (
+        combined.sort_values(["Date", "ISIN"])
+        .drop_duplicates(subset=["Date", "ISIN"], keep="last")
+    )
     return combined
 
 # ───────────────────────────
@@ -105,22 +104,27 @@ def get_combined() -> pd.DataFrame:
 # ───────────────────────────
 st.set_page_config(page_title="UCB AML – Bangladesh Yield Curve (GSOM)", layout="wide")
 st.title("Bangladesh Govt Securities – Secondary Market Yield Curve (GSOM)")
-st.caption("Data: Bangladesh Bank GSOM MTM for T-Bills & T-Bonds (auto-combined). X-axis = Remaining Maturity (years), Y-axis = Market Yield (%).")
+st.caption(
+    "Data: Bangladesh Bank GSOM MTM for T-Bills & T-Bonds (auto-combined). "
+    "X-axis = Remaining Maturity (years), Y-axis = Market Yield (%)."
+)
 
 df = get_combined()
 if df.empty:
     st.error("No data loaded. Check sheet sharing & CSV export permissions.")
     st.stop()
 
-# Sidebar controls
+# Sidebar
 st.sidebar.header("Filters & View")
-view_mode = st.sidebar.radio("View", ["Single date / Latest-in-month", "Compare two months"], index=0)
+view_mode = st.sidebar.radio(
+    "View mode:",
+    ["Single date / Latest-in-month", "Compare two months"],
+    index=0,
+)
 
-# common date/month choices
 all_dates = sorted(df["Date"].dropna().unique())
 all_months = sorted(df["Month"].dropna().unique())
 
-# Helper: for a chosen month, pick latest date within that month
 def latest_date_in_month(month_str: str) -> pd.Timestamp | None:
     subset = df.loc[df["Month"] == month_str, "Date"]
     return subset.max() if not subset.empty else None
@@ -135,7 +139,9 @@ if view_mode == "Single date / Latest-in-month":
     tab1, tab2 = st.tabs(["Pick a specific date", "Pick a month (latest date)"])
 
     with tab1:
-        pick = st.selectbox("Select a date", options=all_dates, format_func=lambda x: x.strftime("%Y-%m-%d"))
+        pick = st.selectbox(
+            "Select a date", options=all_dates, format_func=lambda x: x.strftime("%Y-%m-%d")
+        )
         cdf = curve_for_date(pick)
 
         st.subheader(f"Yield Curve – {pick.strftime('%Y-%m-%d')}")
@@ -147,13 +153,15 @@ if view_mode == "Single date / Latest-in-month":
             hover_data=["ISIN", "InstrumentText", "RemainingMaturity", "MarketPrice", "Outstanding", "Source"],
             labels={"MaturityYears": "Remaining Maturity (years)", "MarketYield": "Yield (%)"},
         )
-        fig.update_traces(mode="markers+lines")  # connect points to feel like a curve
+        fig.update_traces(mode="markers+lines")
         fig.update_layout(height=520)
         st.plotly_chart(fig, use_container_width=True)
 
-        # data preview + export
         st.caption("Filtered data")
-        st.dataframe(cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]], use_container_width=True)
+        st.dataframe(
+            cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
+            use_container_width=True,
+        )
         st.download_button(
             "Download CSV (this view)",
             cdf.to_csv(index=False).encode("utf-8"),
@@ -162,7 +170,7 @@ if view_mode == "Single date / Latest-in-month":
         )
 
     with tab2:
-        pick_m = st.selectbox("Select a month (yyyy-mm)", options=all_months, index=len(all_months)-1 if all_months else 0)
+        pick_m = st.selectbox("Select a month (yyyy-mm)", options=all_months, index=len(all_months)-1)
         d_latest = latest_date_in_month(pick_m)
         if d_latest is None:
             st.warning("No data in that month.")
@@ -182,7 +190,10 @@ if view_mode == "Single date / Latest-in-month":
             st.plotly_chart(fig, use_container_width=True)
 
             st.caption("Filtered data")
-            st.dataframe(cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]], use_container_width=True)
+            st.dataframe(
+                cdf.sort_values("MaturityYears")[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
+                use_container_width=True,
+            )
             st.download_button(
                 "Download CSV (this view)",
                 cdf.to_csv(index=False).encode("utf-8"),
@@ -199,7 +210,6 @@ else:
         m1 = st.selectbox("Month A", options=all_months, index=max(0, len(all_months)-2))
         d1 = latest_date_in_month(m1)
         st.caption(f"Latest date in Month A = **{d1.strftime('%Y-%m-%d') if d1 else 'N/A'}**")
-
     with right:
         m2 = st.selectbox("Month B", options=all_months, index=len(all_months)-1)
         d2 = latest_date_in_month(m2)
@@ -230,7 +240,7 @@ else:
     st.caption("Data used in comparison")
     st.dataframe(
         comp.sort_values(["Which","MaturityYears"])[["Date","Which","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
-        use_container_width=True
+        use_container_width=True,
     )
     st.download_button(
         "Download CSV (comparison view)",
@@ -240,4 +250,8 @@ else:
     )
 
 st.markdown("---")
-st.caption("Tip: This chart uses **Remaining Maturity (years)** on the X-axis, which is correct for a yield curve from secondary market MTM data. Use the comparison view to see curve shifts month-to-month (e.g., steepening/flattening).")
+st.caption(
+    "Tip: This chart uses **Remaining Maturity (years)** on the X-axis. "
+    "For T-Bills, days are converted to years; for T-Bonds, values are already in years. "
+    "Use the comparison view to see curve shifts month-to-month (steepening/flattening)."
+)
