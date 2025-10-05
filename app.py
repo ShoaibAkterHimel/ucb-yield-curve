@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # ───────────────────────────
-# CONFIG: GSOM Google Sheets (secondary MTM) – UPDATED
+# CONFIG: GSOM Google Sheets (secondary MTM)
 # ───────────────────────────
 # T-Bill
 SHEET_TBILL_ID = "1rD831MnVWUGlitw1jUmdwt5jQPrkKMwrQTWBy6P9tAs"
@@ -19,6 +19,10 @@ def csv_url(sheet_id: str, gid: str) -> str:
 
 URL_TBILL = csv_url(SHEET_TBILL_ID, SHEET_TBILL_GID)
 URL_TBOND = csv_url(SHEET_TBOND_ID, SHEET_TBOND_GID)
+
+# Global calendar bounds (show all dates even if no data)
+MIN_CAL_DATE = date(2000, 1, 1)
+MAX_CAL_DATE = date.today()
 
 # ───────────────────────────
 # LOADERS & NORMALIZERS
@@ -50,7 +54,6 @@ def coerce_cols(df: pd.DataFrame) -> pd.DataFrame:
         out[c] = pd.to_datetime(out[c], errors="coerce")
     for c in ["IssuePrice", "RemainingMaturity", "MarketYield", "MarketPrice", "Outstanding"]:
         out[c] = pd.to_numeric(out[c], errors="coerce")
-
     out["InstrumentText"] = out["InstrumentText"].astype(str).str.strip()
     return out
 
@@ -132,10 +135,8 @@ if df.empty:
     st.error("No data loaded. Check sheet sharing & CSV export permissions.")
     st.stop()
 
-# Calendar bounds from data
+# Calendar uses global bounds (not limited by data range)
 all_dates = sorted(df["Date"].dropna().unique())
-min_d = pd.to_datetime(min(all_dates)).date()
-max_d = pd.to_datetime(max(all_dates)).date()
 
 st.sidebar.header("View mode")
 view_mode = st.sidebar.radio(
@@ -145,10 +146,10 @@ view_mode = st.sidebar.radio(
 )
 
 # ───────────────────────────
-# 1) SINGLE DATE — Calendar picker → nearest trading date
+# 1) SINGLE DATE — Calendar picker (any date) → nearest trading date
 # ───────────────────────────
 if view_mode == "Single date":
-    picked = st.date_input("Pick any date", value=max_d, min_value=min_d, max_value=max_d, key="single_cal")
+    picked = st.date_input("Pick any date", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="single_cal")
     nearest = nearest_available_date(all_dates, pd.Timestamp(picked))
     if nearest is None:
         st.warning("No data available around the selected date.")
@@ -163,11 +164,11 @@ if view_mode == "Single date":
         )
 
 # ───────────────────────────
-# 2) LATEST-IN-MONTH — Calendar picker → latest date in that month
+# 2) LATEST-IN-MONTH — Calendar picker (any date) → latest date in that month
 # ───────────────────────────
 elif view_mode == "Latest-in-month":
     picked = st.date_input("Pick any date (we'll use the latest date in that month)",
-                           value=max_d, min_value=min_d, max_value=max_d, key="month_cal")
+                           value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="month_cal")
     m = month_str_from_date(picked)
     d_latest = latest_date_in_month(df, m)
     if d_latest is None:
@@ -184,14 +185,14 @@ elif view_mode == "Latest-in-month":
         )
 
 # ───────────────────────────
-# 3) COMPARE TWO MONTHS — Two calendars → latest date in each month
+# 3) COMPARE TWO MONTHS — Two calendars (any dates) → latest date in each month
 # ───────────────────────────
 elif view_mode == "Compare two months":
     c1, c2 = st.columns(2)
     with c1:
-        pickA = st.date_input("Pick any date for Month A", value=max_d, min_value=min_d, max_value=max_d, key="mA_cal")
+        pickA = st.date_input("Pick any date for Month A", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="mA_cal")
     with c2:
-        pickB = st.date_input("Pick any date for Month B", value=max_d, min_value=min_d, max_value=max_d, key="mB_cal")
+        pickB = st.date_input("Pick any date for Month B", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="mB_cal")
 
     m1 = month_str_from_date(pickA)
     m2 = month_str_from_date(pickB)
@@ -231,14 +232,14 @@ elif view_mode == "Compare two months":
         )
 
 # ───────────────────────────
-# 4) COMPARE TWO DATES — Two calendars → nearest trading dates
+# 4) COMPARE TWO DATES — Two calendars (any dates) → nearest trading dates
 # ───────────────────────────
 else:
     c1, c2 = st.columns(2)
     with c1:
-        dA = st.date_input("Date A", value=max_d, min_value=min_d, max_value=max_d, key="dA_cal")
+        dA = st.date_input("Date A", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="dA_cal")
     with c2:
-        dB = st.date_input("Date B", value=max_d, min_value=min_d, max_value=max_d, key="dB_cal")
+        dB = st.date_input("Date B", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE, key="dB_cal")
 
     nA = nearest_available_date(all_dates, pd.Timestamp(dA))
     nB = nearest_available_date(all_dates, pd.Timestamp(dB))
@@ -281,4 +282,4 @@ else:
         )
 
 st.markdown("---")
-st.caption("All views use calendar inputs. Y-axis fixed 0–16%. Bills: days→years; Bonds: years as-is.")
+st.caption("Calendars allow any date (2000–today). If data isn’t available, we use the nearest trading date (or latest within that month).")
