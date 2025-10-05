@@ -110,7 +110,7 @@ def get_primary() -> pd.DataFrame:
 # ───────────────────────────
 # PLOT HELPERS
 # ───────────────────────────
-def plot_secondary(df, title):
+def plot_secondary_single(df, title):
     fig = go.Figure()
     for typ, g in df.groupby("Type"):
         g = g.sort_values("MaturityYears")
@@ -120,6 +120,34 @@ def plot_secondary(df, title):
     fig.update_yaxes(range=[0,16], title="Yield (%)")
     fig.update_xaxes(title="Remaining Maturity (years)")
     fig.update_layout(title=title, height=520)
+    return fig
+
+def plot_secondary_compare(df, title):
+    """One line per (Label × Type) so dates have different colors/styles."""
+    # Assign dash styles per label to improve separation
+    labels = list(dict.fromkeys(df["Label"].tolist()))
+    dashes = ["solid", "dash", "dot", "dashdot", "longdash"]
+    dash_map = {lab: dashes[i % len(dashes)] for i, lab in enumerate(labels)}
+
+    fig = go.Figure()
+    for (label, typ), g in df.groupby(["Label", "Type"]):
+        g = g.sort_values("MaturityYears")
+        fig.add_trace(
+            go.Scatter(
+                x=g["MaturityYears"], y=g["MarketYield"],
+                mode="lines+markers",
+                name=f"{label} — {typ}",
+                line=dict(shape="spline", dash=dash_map[label]),
+                marker=dict(size=5),
+                hovertemplate=("Date: " + str(label) +
+                               "<br>Type: %{text}<br>Maturity: %{x:.3f} yrs<br>"
+                               "Yield: %{y:.3f}%<extra></extra>"),
+                text=[typ]*len(g),
+            )
+        )
+    fig.update_yaxes(range=[0,16], title="Yield (%)")
+    fig.update_xaxes(title="Remaining Maturity (years)")
+    fig.update_layout(title=title, height=560)
     return fig
 
 def plot_primary(df, title):
@@ -172,19 +200,24 @@ if view_mode.startswith("Secondary"):
     if "Single" in view_mode:
         d = st.date_input("Pick Date", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE)
         n = nearest(pd.Timestamp(d))
-        st.plotly_chart(plot_secondary(curve(n), f"Secondary Yield Curve — {n.date()}"), use_container_width=True)
+        cdf = curve(n)
+        st.plotly_chart(plot_secondary_single(cdf, f"Secondary Yield Curve — {n.date()}"), use_container_width=True)
 
-    # Compare Two Dates
+    # Compare Two Dates  ❗ uses plot_secondary_compare
     elif "Two Dates" in view_mode:
         c1, c2 = st.columns(2)
         with c1: d1 = st.date_input("Date A", value=MAX_CAL_DATE)
         with c2: d2 = st.date_input("Date B", value=MAX_CAL_DATE)
         n1, n2 = nearest(pd.Timestamp(d1)), nearest(pd.Timestamp(d2))
-        df1, df2 = curve(n1).assign(Label=str(n1.date())), curve(n2).assign(Label=str(n2.date()))
-        merged = pd.concat([df1, df2])
-        st.plotly_chart(plot_secondary(merged, f"Secondary Comparison — {n1.date()} vs {n2.date()}"), use_container_width=True)
+        df1 = curve(n1).assign(Label=str(n1.date()))
+        df2 = curve(n2).assign(Label=str(n2.date()))
+        merged = pd.concat([df1, df2], ignore_index=True)
+        st.plotly_chart(
+            plot_secondary_compare(merged, f"Secondary Comparison — {n1.date()} vs {n2.date()}"),
+            use_container_width=True
+        )
 
-    # Compare Two Months
+    # Compare Two Months  ❗ also uses plot_secondary_compare
     else:
         def month_str(d): return pd.Timestamp(d).to_period("M").strftime("%Y-%m")
         def latest_in_month(m): s = df.loc[df["Month"]==m,"Date"]; return s.max() if not s.empty else None
@@ -193,9 +226,13 @@ if view_mode.startswith("Secondary"):
         with c2: m2 = month_str(st.date_input("Pick Month B", value=MAX_CAL_DATE))
         d1, d2 = latest_in_month(m1), latest_in_month(m2)
         if not d1 or not d2: st.warning("No data found."); st.stop()
-        df1, df2 = curve(d1).assign(Label=f"{m1} (latest)"), curve(d2).assign(Label=f"{m2} (latest)")
-        merged = pd.concat([df1, df2])
-        st.plotly_chart(plot_secondary(merged, f"Secondary Comparison — {m1} vs {m2}"), use_container_width=True)
+        df1 = curve(d1).assign(Label=f"{m1} (latest)")
+        df2 = curve(d2).assign(Label=f"{m2} (latest)")
+        merged = pd.concat([df1, df2], ignore_index=True)
+        st.plotly_chart(
+            plot_secondary_compare(merged, f"Secondary Comparison — {m1} vs {m2}"),
+            use_container_width=True
+        )
 
 # ─────────────── PRIMARY VIEW ───────────────
 else:
@@ -227,7 +264,7 @@ else:
         st.stop()
 
     dfA["Label"], dfB["Label"] = m1, m2
-    merged = pd.concat([dfA, dfB])
+    merged = pd.concat([dfA, dfB], ignore_index=True)
     st.plotly_chart(plot_primary(merged, f"Primary Auction Comparison — {m1} vs {m2}"), use_container_width=True)
     st.dataframe(
         merged[["IssueDate","Instrument","TenorYears","CutoffYield","Label"]]
@@ -237,4 +274,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Secondary = GSOM market yields. Primary = auction cut-off yields. Y-axis fixed 0–16%.")
+st.caption("Secondary = GSOM market yields (by date or month). Primary = auction cut-off yields (compare months). Each curve uses separate colors/styles; Y-axis fixed 0–16%.")
