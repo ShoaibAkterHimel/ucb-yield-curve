@@ -314,13 +314,29 @@ else:
         st.warning("No valid months in primary auction data.")
         st.stop()
 
+    # Helper to show months as 'YYYY-Month'
+    def month_pretty(m_str: str) -> str:
+        return pd.Period(m_str).strftime("%Y-%B")
+
     # default to latest and previous months with data
     latest = months[-1]
     prev = months[-2] if len(months) > 1 else months[-1]
 
     c1, c2 = st.columns(2)
-    with c1: m1 = st.selectbox("Month A", months, index=months.index(prev) if prev in months else 0)
-    with c2: m2 = st.selectbox("Month B", months, index=months.index(latest))
+    with c1:
+        m1 = st.selectbox(
+            "Month A",
+            months,
+            index=months.index(prev) if prev in months else 0,
+            format_func=month_pretty,  # ← shows 'YYYY-Month'
+        )
+    with c2:
+        m2 = st.selectbox(
+            "Month B",
+            months,
+            index=months.index(latest),
+            format_func=month_pretty,  # ← shows 'YYYY-Month'
+        )
 
     def month_df(m):
         sub = pri[pri["Month"] == m].copy()
@@ -335,11 +351,11 @@ else:
         st.warning("No data found for one (or both) months.")
         st.stop()
 
-    dfA["Label"], dfB["Label"] = m1, m2
+    dfA["Label"], dfB["Label"] = month_pretty(m1), month_pretty(m2)
     merged = pd.concat([dfA, dfB], ignore_index=True)
 
     st.plotly_chart(
-        plot_primary(merged, f"Primary Auction Comparison — {m1} vs {m2}"),
+        plot_primary(merged, f"Primary Auction Comparison — {month_pretty(m1)} vs {month_pretty(m2)}"),
         use_container_width=True,
     )
     st.dataframe(
