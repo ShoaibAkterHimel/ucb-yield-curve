@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-import re
+import re, calendar
 
 # ───────────────────────────
 # CONFIG: Google Sheets (Secondary GSOM + Primary Auction)
@@ -12,8 +12,10 @@ SHEET_TBILL_ID = "1rD831MnVWUGlitw1jUmdwt5jQPrkKMwrQTWBy6P9tAs"
 SHEET_TBILL_GID = "1446111990"
 SHEET_TBOND_ID = "1ma25T-_yMlzdrzOYxAr2P6eu1gsbjPzq3jxF4PK-xtk"
 SHEET_TBOND_GID = "632609507"
+
+# Primary Auction → Filtered_Data tab (gid=0)
 SHEET_PRIMARY_ID = "1O5seVugWVYfCo7M7Zkn4VW6GltC77G1w0EsmhZEwNkk"
-SHEET_PRIMARY_GID = "193103690"
+SHEET_PRIMARY_GID = "0"
 
 def csv_url(sheet_id: str, gid: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
@@ -71,6 +73,8 @@ def add_helpers(df: pd.DataFrame, inst_type: str) -> pd.DataFrame:
     )
     df = df[(df["MaturityYears"] > 0) & (df["MarketYield"].notna())]
     df["Month"] = df["Date"].dt.to_period("M").astype(str)
+    df["Year"] = df["Date"].dt.year
+    df["MonthNum"] = df["Date"].dt.month
     return df
 
 @st.cache_data(ttl=60 * 30)
@@ -78,13 +82,12 @@ def get_secondary() -> pd.DataFrame:
     tbill = add_helpers(coerce_cols(load_csv(URL_TBILL)), "Bill")
     tbond = add_helpers(coerce_cols(load_csv(URL_TBOND)), "Bond")
     combined = pd.concat([tbill, tbond], ignore_index=True)
-    # Keep ISIN if present, otherwise fallback to InstrumentText to avoid duplicate explosion
     subset_cols = ["Date", "ISIN"] if "ISIN" in combined.columns else ["Date", "InstrumentText"]
     combined = combined.sort_values(["Date"] + subset_cols[1:]).drop_duplicates(subset_cols, keep="last")
     return combined
 
 # ───────────────────────────
-# PRIMARY (Auction)
+# PRIMARY (Auction) — reading Filtered_Data (3yr FRT already removed)
 # ───────────────────────────
 @st.cache_data(ttl=60 * 30)
 def get_primary() -> pd.DataFrame:
@@ -92,9 +95,10 @@ def get_primary() -> pd.DataFrame:
     if df.empty:
         return df
 
+    # Flexible column detection
     c_date = next((c for c in ["Issue Date","IssueDate","Date"] if c in df.columns), None)
     c_instr = next((c for c in ["Instrument","Security","Securities"] if c in df.columns), None)
-    c_yld = next((c for c in ["Cut-off Yield (%)","Cutoff Yield (%)","Cut Off Yield (%)","Cut-off Yield"] if c in df.columns), None)
+    c_yld = next((c for c in ["Cut-off Yield (%)","Cutoff Yield (%)","Cut Off Yield (%)","Cut-off Yield","Cutoff Yield"] if c in df.columns), None)
     if not all([c_date, c_instr, c_yld]):
         return pd.DataFrame()
 
@@ -102,6 +106,7 @@ def get_primary() -> pd.DataFrame:
     df["IssueDate"] = pd.to_datetime(df["IssueDate"], errors="coerce", dayfirst=True)
     df["CutoffYield"] = pd.to_numeric(df["CutoffYield"], errors="coerce")
 
+    # derive tenor in years from the Instrument text
     def parse_tenor(txt):
         if not isinstance(txt, str):
             return np.nan
@@ -118,6 +123,8 @@ def get_primary() -> pd.DataFrame:
 
     df["TenorYears"] = df["Instrument"].apply(parse_tenor)
     df["Month"] = df["IssueDate"].dt.to_period("M").astype(str)
+    df["Year"] = df["IssueDate"].dt.year
+    df["MonthNum"] = df["IssueDate"].dt.month
     df = df.dropna(subset=["TenorYears","CutoffYield","IssueDate"])
     return df
 
@@ -125,7 +132,6 @@ def get_primary() -> pd.DataFrame:
 # PLOT HELPERS
 # ───────────────────────────
 def plot_secondary_single(df: pd.DataFrame, title: str) -> go.Figure:
-    """Single date view: separate lines for Bill & Bond."""
     fig = go.Figure()
     for typ, g in df.groupby("Type"):
         g = g.sort_values("MaturityYears")
@@ -145,22 +151,17 @@ def plot_secondary_single(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 def plot_secondary_compare(df: pd.DataFrame, title: str) -> go.Figure:
-    """
-    Comparison views: ONE continuous line per Label (date/month),
-    combining Bill + Bond points; color distinguishes the two labels.
-    """
     fig = go.Figure()
     for label, g in df.groupby("Label"):
         g = g.sort_values("MaturityYears")
         fig.add_trace(
             go.Scatter(
                 x=g["MaturityYears"], y=g["MarketYield"],
-                mode="lines+markers",
-                name=str(label),                  # legend shows the date/month only
+                mode="lines+markers", name=str(label),
                 line=dict(shape="spline"),
-                connectgaps=True,                 # do not break at Bill/Bond boundary
+                connectgaps=True,
                 marker=dict(size=5),
-                text=g["Type"],                   # show Bill/Bond in tooltip only
+                text=g["Type"],
                 hovertemplate=("Date: " + str(label) +
                                "<br>Type: %{text}"
                                "<br>Maturity: %{x:.3f} yrs"
@@ -173,7 +174,6 @@ def plot_secondary_compare(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 def plot_primary(df: pd.DataFrame, title: str) -> go.Figure:
-    """Primary auction: one line per selected month (latest per tenor)."""
     fig = go.Figure()
     for label, g in df.groupby("Label"):
         g = g.sort_values("TenorYears")
@@ -194,7 +194,7 @@ def plot_primary(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 # ───────────────────────────
-# TABLE HELPER (robust to missing columns)
+# TABLE HELPER
 # ───────────────────────────
 def show_sheet_table(df: pd.DataFrame, columns_wanted: list[str]):
     cols_available = [c for c in columns_wanted if c in df.columns]
@@ -235,18 +235,15 @@ if view_mode.startswith("Secondary"):
         dist = pd.Series([abs((pd.Timestamp(d) - target).days) for d in all_dates], index=all_dates)
         return dist.idxmin()
 
-    def curve(d):  # rows used for the chosen date
+    def curve(d):
         return sec[sec["Date"] == d].copy()
 
     # Single Date
     if "Single" in view_mode:
-        d = st.date_input("Pick Date", value=MAX_CAL_DATE, min_value=MIN_CAL_DATE, max_value=MAX_CAL_DATE)
+        d = st.date_input("Pick Date", value=MAX_CAL_DATE)
         n = nearest(pd.Timestamp(d))
         df_used = curve(n).sort_values("MaturityYears")
-        st.plotly_chart(
-            plot_secondary_single(df_used, f"Secondary Yield Curve — {n.date()}"),
-            use_container_width=True,
-        )
+        st.plotly_chart(plot_secondary_single(df_used, f"Secondary Yield Curve — {n.date()}"), use_container_width=True)
         st.subheader("Sheet table view (rows used)")
         show_sheet_table(
             df_used[["Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
@@ -262,39 +259,53 @@ if view_mode.startswith("Secondary"):
         df1 = curve(n1).assign(Label=str(n1.date()))
         df2 = curve(n2).assign(Label=str(n2.date()))
         merged = pd.concat([df1, df2], ignore_index=True).sort_values(["Label","MaturityYears"])
-        st.plotly_chart(
-            plot_secondary_compare(merged, f"Secondary Comparison — {n1.date()} vs {n2.date()}"),
-            use_container_width=True,
-        )
+        st.plotly_chart(plot_secondary_compare(merged, f"Secondary Comparison — {n1.date()} vs {n2.date()}"), use_container_width=True)
         st.subheader("Sheet table view (rows used)")
         show_sheet_table(
             merged[["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"]],
             ["Label","Date","Type","ISIN","InstrumentText","MaturityYears","MarketYield","RemainingMaturity","MarketPrice","Outstanding"],
         )
 
-    # Compare Two Months
+    # Compare Two Months (Year → Month pickers)
     else:
-        def month_str(d): return pd.Timestamp(d).to_period("M").strftime("%Y-%m")
+        years = sorted(sec["Year"].dropna().unique().tolist())
+        months_all = sorted(sec["Month"].unique())
+        latest_m, prev_m = months_all[-1], (months_all[-2] if len(months_all) > 1 else months_all[-1])
+
+        def split_month(mstr): y, m = mstr.split("-"); return int(y), int(m)
+        def month_label(y, m): return f"{y}-{calendar.month_name[m]}"
+
+        def_yearA, def_monA = split_month(prev_m)
+        def_yearB, def_monB = split_month(latest_m)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            yearA = st.selectbox("Year A", years, index=years.index(def_yearA))
+            monA_opts = sorted(sec.loc[sec["Year"] == yearA, "MonthNum"].unique())
+            monA = st.selectbox("Month A", monA_opts, index=monA_opts.index(def_monA), format_func=lambda m: calendar.month_name[m])
+        with c2:
+            yearB = st.selectbox("Year B", years, index=years.index(def_yearB))
+            monB_opts = sorted(sec.loc[sec["Year"] == yearB, "MonthNum"].unique())
+            monB = st.selectbox("Month B", monB_opts, index=monB_opts.index(def_monB), format_func=lambda m: calendar.month_name[m])
+
+        m1, m2 = f"{yearA}-{monA:02d}", f"{yearB}-{monB:02d}"
+
         def latest_in_month(m):
             s = sec.loc[sec["Month"] == m, "Date"]
             return s.max() if not s.empty else None
-
-        c1, c2 = st.columns(2)
-        with c1: m1 = month_str(st.date_input("Pick Month A", value=MAX_CAL_DATE))
-        with c2: m2 = month_str(st.date_input("Pick Month B", value=MAX_CAL_DATE))
 
         d1, d2 = latest_in_month(m1), latest_in_month(m2)
         if not d1 or not d2:
             st.warning("No data found for one (or both) months.")
             st.stop()
 
-        df1 = curve(d1).assign(Label=f"{m1} (latest)")
-        df2 = curve(d2).assign(Label=f"{m2} (latest)")
+        df1 = curve(d1).assign(Label=month_label(yearA, monA))
+        df2 = curve(d2).assign(Label=month_label(yearB, monB))
         merged = pd.concat([df1, df2], ignore_index=True).sort_values(["Label","MaturityYears"])
 
         st.plotly_chart(
-            plot_secondary_compare(merged, f"Secondary Comparison — {m1} vs {m2}"),
-            use_container_width=True,
+            plot_secondary_compare(merged, f"Secondary Comparison — {month_label(yearA,monA)} vs {month_label(yearB,monB)}"),
+            use_container_width=True
         )
         st.subheader("Sheet table view (rows used)")
         show_sheet_table(
@@ -309,53 +320,57 @@ else:
         st.error("Primary auction data unavailable or empty.")
         st.stop()
 
-    months = sorted(pri["Month"].unique())
-    if not months:
+    years = sorted(pri["Year"].dropna().unique().tolist())
+    months_all = sorted(pri["Month"].unique())
+    if not years or not months_all:
         st.warning("No valid months in primary auction data.")
         st.stop()
 
-    # Helper to show months as 'YYYY-Month'
-    def month_pretty(m_str: str) -> str:
-        return pd.Period(m_str).strftime("%Y-%B")
+    latest_m = months_all[-1]
+    prev_m = months_all[-2] if len(months_all) > 1 else months_all[-1]
 
-    # default to latest and previous months with data
-    latest = months[-1]
-    prev = months[-2] if len(months) > 1 else months[-1]
+    def split_month(mstr): y, m = mstr.split("-"); return int(y), int(m)
+    def month_label(y, m): return f"{y}-{calendar.month_name[m]}"
+
+    def_yearA, def_monA = split_month(prev_m)
+    def_yearB, def_monB = split_month(latest_m)
 
     c1, c2 = st.columns(2)
     with c1:
-        m1 = st.selectbox(
-            "Month A",
-            months,
-            index=months.index(prev) if prev in months else 0,
-            format_func=month_pretty,  # ← shows 'YYYY-Month'
-        )
+        yearA = st.selectbox("Year A", years, index=years.index(def_yearA) if def_yearA in years else len(years)-1)
+        monA_opts = sorted(pri.loc[pri["Year"] == yearA, "MonthNum"].unique().tolist())
+        monA = st.selectbox("Month A", monA_opts, index=monA_opts.index(def_monA) if def_monA in monA_opts else len(monA_opts)-1,
+                            format_func=lambda m: calendar.month_name[m])
     with c2:
-        m2 = st.selectbox(
-            "Month B",
-            months,
-            index=months.index(latest),
-            format_func=month_pretty,  # ← shows 'YYYY-Month'
-        )
+        yearB = st.selectbox("Year B", years, index=years.index(def_yearB) if def_yearB in years else len(years)-1)
+        monB_opts = sorted(pri.loc[pri["Year"] == yearB, "MonthNum"].unique().tolist())
+        monB = st.selectbox("Month B", monB_opts, index=monB_opts.index(def_monB) if def_monB in monB_opts else len(monB_opts)-1,
+                            format_func=lambda m: calendar.month_name[m])
 
-    def month_df(m):
+    m1, m2 = f"{yearA}-{monA:02d}", f"{yearB}-{monB:02d}"
+
+    def month_df(m: str) -> pd.DataFrame:
         sub = pri[pri["Month"] == m].copy()
         if sub.empty:
             return sub
-        # take the latest auction per tenor inside the month
-        idx = sub.groupby("TenorYears")["IssueDate"].idxmax()
+        # keep only plottable rows
+        sub = sub[sub["TenorYears"].notna() & sub["CutoffYield"].notna()]
+        if sub.empty:
+            return sub
+        # latest auction per tenor within the month
+        idx = sub.sort_values("IssueDate").groupby("TenorYears")["IssueDate"].idxmax()
         return sub.loc[idx].sort_values("TenorYears")
 
     dfA, dfB = month_df(m1), month_df(m2)
     if dfA.empty or dfB.empty:
-        st.warning("No data found for one (or both) months.")
+        st.warning("No plottable primary-auction data for one (or both) selected months.")
         st.stop()
 
-    dfA["Label"], dfB["Label"] = month_pretty(m1), month_pretty(m2)
+    dfA["Label"], dfB["Label"] = month_label(yearA, monA), month_label(yearB, monB)
     merged = pd.concat([dfA, dfB], ignore_index=True)
 
     st.plotly_chart(
-        plot_primary(merged, f"Primary Auction Comparison — {month_pretty(m1)} vs {month_pretty(m2)}"),
+        plot_primary(merged, f"Primary Auction Comparison — {month_label(yearA, monA)} vs {month_label(yearB, monB)}"),
         use_container_width=True,
     )
     st.dataframe(
@@ -366,4 +381,4 @@ else:
     )
 
 st.markdown("---")
-st.caption("Secondary = GSOM market yields. Primary = auction cut-off yields. Comparison views draw one continuous line per date/month; the table shows exactly the rows used (columns shown only if present).")
+st.caption("Secondary = GSOM market yields. Primary = auction cut-off yields (reading Filtered_Data). Year → Month pickers for both primary and secondary monthly comparisons; Y-axis fixed at 0–16%.")
